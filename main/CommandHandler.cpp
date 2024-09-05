@@ -35,6 +35,8 @@
 #include "CryptoUtil.h"
 #include "ECCX08Cert.h"
 
+#include "lwip/udp.h"
+
 #include "esp_log.h"
 
 #ifdef LWIP_PROVIDE_ERRNO
@@ -55,6 +57,22 @@ WiFiServer tcpServers[MAX_SOCKETS];
 
 WiFiClient bearssl_tcp_client;
 BearSSLClient bearsslClient(bearssl_tcp_client, ArduinoIoTCloudTrustAnchor, ArduinoIoTCloudTrustAnchor_NUM);
+
+#pragma pack(push, 1)
+struct sensor_data_t {
+  uint8_t data[64];
+};
+#pragma pack(pop)
+
+static sensor_data_t lidar_data{};
+
+#pragma pack(push, 1)
+struct command_data_t {
+  uint8_t data[64];
+};
+#pragma pack(pop)
+
+static command_data_t command_data{};
 
 int setNet(const uint8_t command[], uint8_t response[])
 {
@@ -1055,6 +1073,19 @@ int setEnt(const uint8_t command[], uint8_t response[])
   response[4] = 1;
 
   return 6;
+}
+
+//0x41
+int setLidarData(const uint8_t command[], uint8_t response[]) {
+  memcpy(&lidar_data, &command[4], sizeof(struct sensor_data_t));
+
+  response[2] = 1; //number of parameters
+
+  response[3] = sizeof(struct command_data_t);
+
+  memcpy(&response[4], &command_data, sizeof(struct command_data_t));
+
+  return 5 + sizeof(struct command_data_t);
 }
 
 int sendDataTcp(const uint8_t command[], uint8_t response[])
@@ -2086,7 +2117,7 @@ const CommandHandlerType commandHandlers[] = {
   disconnect, NULL, getIdxRSSI, getIdxEnct, reqHostByName, getHostByName, startScanNetworks, getFwVersion, NULL, sendUDPdata, getRemoteData, getTime, getIdxBSSID, getIdxChannel, ping, getSocket,
 
   // 0x40 -> 0x4f
-  setEnt, NULL, NULL, NULL, sendDataTcp, getDataBufTcp, insertDataBuf, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  setEnt, setLidarData, NULL, NULL, sendDataTcp, getDataBufTcp, insertDataBuf, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 
   // 0x50 -> 0x5f
   setPinMode, setDigitalWrite, setAnalogWrite, getDigitalRead, getAnalogRead, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -2119,6 +2150,20 @@ CommandHandlerClass::CommandHandlerClass()
 {
 }
 
+void recv_fast_data_query(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {  
+  udp_sendto(pcb, (pbuf *) arg, addr, port);
+
+  size_t s = sizeof(struct command_data_t);
+  
+  if (p->len < s) {
+    s = p->len;
+  }
+
+  memcpy(&command_data, p->payload, s);
+
+  pbuf_free(p);
+}
+
 static const int GPIO_IRQ = 0;
 
 void CommandHandlerClass::begin()
@@ -2135,6 +2180,14 @@ void CommandHandlerClass::begin()
   WiFi.onDisconnect(CommandHandlerClass::onWiFiDisconnect);
 
   xTaskCreatePinnedToCore(CommandHandlerClass::gpio0Updater, "gpio0Updater", 8192, NULL, 1, NULL, 1);
+
+  struct pbuf* new_pbuf = pbuf_alloc(PBUF_TRANSPORT, sizeof(struct sensor_data_t), PBUF_REF);
+  new_pbuf->payload = &lidar_data;
+
+  udp_pcb * lidar_data_provider = udp_new();
+  udp_bind(lidar_data_provider, IP4_ADDR_ANY, 28840);
+  lidar_data_provider->recv = recv_fast_data_query;
+  lidar_data_provider->recv_arg = new_pbuf;
 }
 
 #define UDIV_UP(a, b) (((a) + (b) - 1) / (b))
